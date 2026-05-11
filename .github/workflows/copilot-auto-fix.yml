@@ -1,0 +1,76 @@
+# Copyright (C) PeterSuh-Q3
+# Automatically create an issue and assign it to Copilot Agent on build failure
+
+name: Auto-fix with Copilot on Build Failure
+
+on:
+  workflow_run:
+    workflows: ["Build Modules (full.sh)"]   # Must match the name in build_full.yml
+    types: [completed]
+
+jobs:
+  create-fix-issue:
+    if: ${{ github.event.workflow_run.conclusion == 'failure' }}
+    runs-on: ubuntu-latest
+
+    permissions:
+      issues: write
+      contents: read
+
+    steps:
+      - name: Create issue and assign to Copilot
+        env:
+          GH_TOKEN: ${{ secrets.COPILOT_ASSIGN_PAT }}
+          REPO:     ${{ github.repository }}
+          RUN_ID:   ${{ github.event.workflow_run.id }}
+          RUN_NAME: ${{ github.event.workflow_run.name }}
+          RUN_URL:  ${{ github.event.workflow_run.html_url }}
+          PLATFORM: ${{ github.event.workflow_run.inputs.platform }}
+          VERSION:  ${{ github.event.workflow_run.inputs.version }}
+        run: |
+          TITLE="fix: Build failure in ${PLATFORM}-${VERSION} (Run #${RUN_ID})"
+
+          BODY="## Automated Build Failure Detected
+
+          **Workflow:** ${RUN_NAME}
+          **Platform / Version:** ${PLATFORM} / ${VERSION}
+          **Failure Link:** ${RUN_URL}
+
+          ## Action Required
+
+          - Analyze the root cause of build failure for \`${PLATFORM}\` + DSM ${VERSION} in \`src/full.sh\`
+          - Build log artifact: [build-log-${PLATFORM}-${VERSION}](${RUN_URL})
+          - After fix, verify by re-running the \`build_full.yml\` workflow
+
+          ## Notes
+
+          - Build output directory: \`${PLATFORM}-${VERSION}-<KVER>\`
+          - Related files: \`src/full.sh\`, \`src/ALL-PLATFORMS\`
+          "
+
+          # Create issue
+          ISSUE_URL=$(gh issue create \
+            --repo "${REPO}" \
+            --title "${TITLE}" \
+            --body "${BODY}" \
+            --label "bug")
+
+          echo "Created issue: ${ISSUE_URL}"
+
+          # Extract issue number
+          ISSUE_NUMBER=$(echo "${ISSUE_URL}" | grep -oE '[0-9]+$')
+
+          # Assign to Copilot Agent (using GraphQL API)
+          gh api graphql -f query='
+            mutation($issueId: ID!, $assigneeIds: [ID!]!) {
+              addAssigneesToAssignable(input: {assignableId: $issueId, assigneeIds: $assigneeIds}) {
+                assignable { ... on Issue { number } }
+              }
+            }
+          ' -f issueId="$(gh api repos/${REPO}/issues/${ISSUE_NUMBER} --jq .node_id)" \
+            -f assigneeIds[]="$(gh api /users/copilot --jq .node_id)" || true
+
+          # Fallback if GraphQL fails: assign via gh issue edit
+          gh issue edit "${ISSUE_NUMBER}" \
+            --repo "${REPO}" \
+            --add-assignee "copilot" || true
